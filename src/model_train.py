@@ -60,7 +60,10 @@ def fit_classifier(
     y_train: np.ndarray,
     train_config: TrainConfig,
     classifier_name: str,
+    feature_names: list[str] | None = None,
+    classifier_params: dict[str, Any] | None = None,
 ) -> tuple[StandardScaler | None, Any]:
+    classifier_params = classifier_params or {}
     if classifier_name == "logreg":
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
@@ -68,11 +71,13 @@ def fit_classifier(
             max_iter=train_config.max_iter,
             class_weight=train_config.class_weight,
             random_state=train_config.seed,
+            **classifier_params,
         )
         classifier.fit(X_train_scaled, y_train)
         return scaler, classifier
 
     if classifier_name == "lightgbm":
+        X_train_frame = pd.DataFrame(X_train, columns=feature_names) if feature_names is not None else X_train
         classifier = LGBMClassifier(
             n_estimators=400,
             learning_rate=0.03,
@@ -86,8 +91,9 @@ def fit_classifier(
             random_state=train_config.seed,
             class_weight=train_config.class_weight,
             verbosity=-1,
+            **classifier_params,
         )
-        classifier.fit(X_train, y_train)
+        classifier.fit(X_train_frame, y_train)
         return None, classifier
 
     raise ValueError(f"Unsupported classifier: {classifier_name}")
@@ -207,8 +213,9 @@ def main() -> None:
         y_train=y_train,
         train_config=train_config,
         classifier_name=args.classifier,
+        feature_names=extractor.feature_names,
     )
-    X_val_for_model = scaler.transform(X_val) if scaler is not None else X_val
+    X_val_for_model = scaler.transform(X_val) if scaler is not None else pd.DataFrame(X_val, columns=extractor.feature_names)
     val_scores = classifier.predict_proba(X_val_for_model)[:, 1]
 
     metrics = evaluate_predictions(

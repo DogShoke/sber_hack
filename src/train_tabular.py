@@ -71,8 +71,9 @@ def main() -> None:
         y_train=y_train,
         train_config=train_config,
         classifier_name=args.classifier,
+        feature_names=feature_names,
     )
-    X_val_for_model = scaler.transform(X_val) if scaler is not None else X_val
+    X_val_for_model = scaler.transform(X_val) if scaler is not None else pd.DataFrame(X_val, columns=feature_names)
     val_scores = classifier.predict_proba(X_val_for_model)[:, 1]
 
     metrics = evaluate_predictions(
