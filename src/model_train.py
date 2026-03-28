@@ -150,6 +150,20 @@ def parse_args() -> argparse.Namespace:
         default="lightgbm",
         help="Tabular classifier trained on top of extracted features.",
     )
+    parser.add_argument("--load-in-4bit", action="store_true", help="Load base model in 4-bit quantized mode.")
+    parser.add_argument("--load-in-8bit", action="store_true", help="Load base model in 8-bit quantized mode.")
+    parser.add_argument(
+        "--low-cpu-mem-usage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable memory-efficient HF loading.",
+    )
+    parser.add_argument(
+        "--offload-folder",
+        type=Path,
+        default=None,
+        help="Optional folder for HF offload files.",
+    )
     return parser.parse_args()
 
 
@@ -157,7 +171,13 @@ def main() -> None:
     args = parse_args()
 
     data_config = DataConfig(data_path=args.data_path)
-    model_config = ModelConfig(model_name_or_path=args.model_name_or_path)
+    model_config = ModelConfig(
+        model_name_or_path=args.model_name_or_path,
+        load_in_4bit=args.load_in_4bit,
+        load_in_8bit=args.load_in_8bit,
+        low_cpu_mem_usage=args.low_cpu_mem_usage,
+        offload_folder=args.offload_folder,
+    )
     train_config = TrainConfig(
         model_output_path=args.output_model_path,
         feature_dump_path=args.feature_dump_path,

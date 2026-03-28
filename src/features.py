@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from src.config import ModelConfig
 
@@ -189,9 +189,28 @@ class GigaChatFeatureExtractor:
         }
         if self.config.device_map:
             model_kwargs["device_map"] = self.config.device_map
+        if self.config.low_cpu_mem_usage:
+            model_kwargs["low_cpu_mem_usage"] = True
+        if self.config.offload_folder is not None:
+            model_kwargs["offload_folder"] = str(self.config.offload_folder)
+
+        if self.config.load_in_4bit and self.config.load_in_8bit:
+            raise ValueError("Only one quantization mode can be enabled at a time.")
+
+        if self.config.load_in_4bit:
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
+        elif self.config.load_in_8bit:
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_8bit=True,
+            )
 
         torch_dtype = _resolve_torch_dtype(self.config.torch_dtype)
-        if torch_dtype is not None:
+        if torch_dtype is not None and not (self.config.load_in_4bit or self.config.load_in_8bit):
             model_kwargs["torch_dtype"] = torch_dtype
 
         self.model = AutoModelForCausalLM.from_pretrained(

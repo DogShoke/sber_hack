@@ -46,12 +46,22 @@ class HallucinationInferencePipeline:
 def load_pipeline(
     model_bundle_path: str | Path,
     model_name_or_path: str | None = None,
+    load_in_4bit: bool = False,
+    load_in_8bit: bool = False,
+    low_cpu_mem_usage: bool = True,
+    offload_folder: str | Path | None = None,
 ) -> HallucinationInferencePipeline:
     bundle: BaselineBundle = load_pickle(model_bundle_path)
     model_source = model_name_or_path or bundle.model_config.model_name_or_path
     extractor = GigaChatFeatureExtractor(
         model_name_or_path=model_source,
-        config=ModelConfig(model_name_or_path=model_source),
+        config=ModelConfig(
+            model_name_or_path=model_source,
+            load_in_4bit=load_in_4bit,
+            load_in_8bit=load_in_8bit,
+            low_cpu_mem_usage=low_cpu_mem_usage,
+            offload_folder=Path(offload_folder) if offload_folder is not None else None,
+        ),
     )
     return HallucinationInferencePipeline(bundle=bundle, extractor=extractor)
 
@@ -62,6 +72,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-name-or-path", type=str, default=None)
     parser.add_argument("--prompt", type=str, required=True)
     parser.add_argument("--model-answer", type=str, required=True)
+    parser.add_argument("--load-in-4bit", action="store_true", help="Load base model in 4-bit quantized mode.")
+    parser.add_argument("--load-in-8bit", action="store_true", help="Load base model in 8-bit quantized mode.")
+    parser.add_argument(
+        "--low-cpu-mem-usage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable memory-efficient HF loading.",
+    )
+    parser.add_argument(
+        "--offload-folder",
+        type=Path,
+        default=None,
+        help="Optional folder for HF offload files.",
+    )
     return parser.parse_args()
 
 
@@ -70,6 +94,10 @@ def main() -> None:
     pipeline = load_pipeline(
         model_bundle_path=args.model_bundle_path,
         model_name_or_path=args.model_name_or_path,
+        load_in_4bit=args.load_in_4bit,
+        load_in_8bit=args.load_in_8bit,
+        low_cpu_mem_usage=args.low_cpu_mem_usage,
+        offload_folder=args.offload_folder,
     )
     result = pipeline.predict_one(prompt=args.prompt, model_answer=args.model_answer)
 

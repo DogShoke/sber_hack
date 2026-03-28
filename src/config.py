@@ -31,6 +31,10 @@ class ModelConfig:
     device_map: str = "auto"
     torch_dtype: str = "auto"
     trust_remote_code: bool = True
+    load_in_4bit: bool = False
+    load_in_8bit: bool = False
+    low_cpu_mem_usage: bool = True
+    offload_folder: Path | None = None
 
 
 @dataclass(slots=True)
