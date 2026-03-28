@@ -46,6 +46,12 @@ BASE_FEATURE_NAMES = [
     "top1_top2_margin_mean",
     "top1_top2_margin_min",
     "top1_top2_margin_p10",
+    "bottom3_logprob_mean",
+    "bottom5_logprob_mean",
+    "top3_entropy_mean",
+    "top5_entropy_mean",
+    "longest_low_logprob_run",
+    "longest_high_entropy_run",
     "num_sentences",
     "sentence_mean_logprob_mean",
     "sentence_mean_logprob_min",
@@ -85,6 +91,14 @@ def get_feature_names(layer_specs: tuple[str, ...] = DEFAULT_LAYER_SPECS) -> lis
                 f"prompt_answer_l2_distance_{layer_name}",
             ]
         )
+    feature_names.extend(
+        [
+            "last_layer_prompt_answer_first_token_cosine_distance",
+            "last_layer_prompt_answer_last_token_cosine_distance",
+            "last_layer_prompt_answer_first_token_l2_distance",
+            "last_layer_prompt_answer_last_token_l2_distance",
+        ]
+    )
     return feature_names
 
 
@@ -97,7 +111,7 @@ def extract_uncertainty_features(
     answer_logits: torch.Tensor,
 ) -> np.ndarray:
     if token_logprobs.numel() == 0:
-        return np.zeros(14, dtype=np.float32)
+        return np.zeros(20, dtype=np.float32)
 
     sorted_logits = torch.topk(answer_logits, k=2, dim=-1).values
     top1_top2_margin = sorted_logits[:, 0] - sorted_logits[:, 1]
@@ -120,6 +134,12 @@ def extract_uncertainty_features(
             float(top1_top2_margin.mean().item()),
             float(top1_top2_margin.min().item()),
             float(torch.quantile(top1_top2_margin, 0.10).item()),
+            float(_bottom_k_mean(token_logprobs, k=3)),
+            float(_bottom_k_mean(token_logprobs, k=5)),
+            float(_top_k_mean(token_entropies, k=3)),
+            float(_top_k_mean(token_entropies, k=5)),
+            float(_longest_boolean_run(token_logprobs <= low_logprob_threshold) / max(token_logprobs.numel(), 1)),
+            float(_longest_boolean_run(token_entropies >= high_entropy_threshold) / max(token_entropies.numel(), 1)),
         ],
         dtype=np.float32,
     )
@@ -228,6 +248,7 @@ def extract_hidden_state_features(
         len(layer_specs) * len(HIDDEN_FEATURE_STATS)
         + max(len(layer_specs) - 1, 0) * 2
         + len(layer_specs) * 2
+        + 4
     )
     if seq_len <= answer_start:
         return np.zeros(num_hidden_features, dtype=np.float32)
@@ -269,6 +290,26 @@ def extract_hidden_state_features(
                 float(torch.linalg.vector_norm(prompt_vector - answer_vector).item()),
             ]
         )
+
+    last_layer = selected_layers[-1]
+    prompt_last_token_vector = _pool_hidden_state_span(last_layer, max(prompt_end - 1, 0), prompt_end)
+    answer_first_token_vector = _pool_hidden_state_span(last_layer, answer_start, min(answer_start + 1, seq_len))
+    answer_last_token_vector = _pool_hidden_state_span(last_layer, max(seq_len - 1, answer_start), seq_len)
+
+    feature_values.extend(
+        [
+            float(1.0 - torch.nn.functional.cosine_similarity(
+                prompt_last_token_vector.unsqueeze(0),
+                answer_first_token_vector.unsqueeze(0),
+            ).item()),
+            float(1.0 - torch.nn.functional.cosine_similarity(
+                prompt_last_token_vector.unsqueeze(0),
+                answer_last_token_vector.unsqueeze(0),
+            ).item()),
+            float(torch.linalg.vector_norm(prompt_last_token_vector - answer_first_token_vector).item()),
+            float(torch.linalg.vector_norm(prompt_last_token_vector - answer_last_token_vector).item()),
+        ]
+    )
 
     return np.asarray(feature_values, dtype=np.float32)
 
@@ -407,7 +448,7 @@ def build_feature_vector(
     )
 
     if num_answer_tokens == 0:
-        uncertainty_features = np.zeros(14, dtype=np.float32)
+        uncertainty_features = np.zeros(20, dtype=np.float32)
         sentence_features = np.zeros(8, dtype=np.float32)
         hidden_features = extract_hidden_state_features(
             hidden_states=hidden_states,
@@ -556,3 +597,29 @@ def _pool_hidden_state_span(
     if hidden_state_span.shape[0] == 0:
         return torch.zeros(layer_hidden_state.shape[-1], dtype=torch.float32, device=layer_hidden_state.device)
     return hidden_state_span.mean(dim=0)
+
+
+def _bottom_k_mean(values: torch.Tensor, k: int) -> float:
+    if values.numel() == 0:
+        return 0.0
+    effective_k = min(k, values.numel())
+    return torch.topk(values, k=effective_k, largest=False).values.mean().item()
+
+
+def _top_k_mean(values: torch.Tensor, k: int) -> float:
+    if values.numel() == 0:
+        return 0.0
+    effective_k = min(k, values.numel())
+    return torch.topk(values, k=effective_k, largest=True).values.mean().item()
+
+
+def _longest_boolean_run(mask: torch.Tensor) -> int:
+    longest_run = 0
+    current_run = 0
+    for flag in mask.tolist():
+        if flag:
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 0
+    return longest_run
