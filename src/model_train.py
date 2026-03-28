@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
+from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -13,15 +15,16 @@ from tqdm import tqdm
 from src.config import DataConfig, ModelConfig, TrainConfig
 from src.data_utils import make_train_validation_split
 from src.evaluate import build_precision_recall_curve, evaluate_predictions
-from src.features import FEATURE_NAMES, GigaChatFeatureExtractor
+from src.features import GigaChatFeatureExtractor
 from src.utils import ensure_dir, save_json, save_pickle, set_seed
 
 
 @dataclass(slots=True)
 class BaselineBundle:
     feature_names: list[str]
-    scaler: StandardScaler
-    classifier: LogisticRegression
+    classifier_name: str
+    scaler: StandardScaler | None
+    classifier: Any
     data_config: DataConfig
     model_config: ModelConfig
     train_config: TrainConfig
@@ -56,17 +59,38 @@ def fit_classifier(
     X_train: np.ndarray,
     y_train: np.ndarray,
     train_config: TrainConfig,
-) -> tuple[StandardScaler, LogisticRegression]:
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
+    classifier_name: str,
+) -> tuple[StandardScaler | None, Any]:
+    if classifier_name == "logreg":
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        classifier = LogisticRegression(
+            max_iter=train_config.max_iter,
+            class_weight=train_config.class_weight,
+            random_state=train_config.seed,
+        )
+        classifier.fit(X_train_scaled, y_train)
+        return scaler, classifier
 
-    classifier = LogisticRegression(
-        max_iter=train_config.max_iter,
-        class_weight=train_config.class_weight,
-        random_state=train_config.seed,
-    )
-    classifier.fit(X_train_scaled, y_train)
-    return scaler, classifier
+    if classifier_name == "lightgbm":
+        classifier = LGBMClassifier(
+            n_estimators=400,
+            learning_rate=0.03,
+            num_leaves=31,
+            min_child_samples=20,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            reg_alpha=0.1,
+            reg_lambda=0.5,
+            objective="binary",
+            random_state=train_config.seed,
+            class_weight=train_config.class_weight,
+            verbosity=-1,
+        )
+        classifier.fit(X_train, y_train)
+        return None, classifier
+
+    raise ValueError(f"Unsupported classifier: {classifier_name}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,6 +143,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cap on the number of samples per split for quick smoke tests.",
     )
+    parser.add_argument(
+        "--classifier",
+        type=str,
+        choices=("lightgbm", "logreg"),
+        default="lightgbm",
+        help="Tabular classifier trained on top of extracted features.",
+    )
     return parser.parse_args()
 
 
@@ -151,8 +182,14 @@ def main() -> None:
     X_train, y_train, train_times_ms = build_feature_matrix(train_df, extractor)
     X_val, y_val, val_times_ms = build_feature_matrix(validation_df, extractor)
 
-    scaler, classifier = fit_classifier(X_train=X_train, y_train=y_train, train_config=train_config)
-    val_scores = classifier.predict_proba(scaler.transform(X_val))[:, 1]
+    scaler, classifier = fit_classifier(
+        X_train=X_train,
+        y_train=y_train,
+        train_config=train_config,
+        classifier_name=args.classifier,
+    )
+    X_val_for_model = scaler.transform(X_val) if scaler is not None else X_val
+    val_scores = classifier.predict_proba(X_val_for_model)[:, 1]
 
     metrics = evaluate_predictions(
         y_true=y_val,
@@ -164,14 +201,15 @@ def main() -> None:
             "num_train_samples": int(len(train_df)),
             "num_validation_samples": int(len(validation_df)),
             "num_features": int(X_train.shape[1]),
-            "feature_names": FEATURE_NAMES,
+            "feature_names": extractor.feature_names,
             "train_model_time_ms_mean": float(train_times_ms.mean()),
             "validation_model_time_ms_mean": float(val_times_ms.mean()),
         }
     )
 
     bundle = BaselineBundle(
-        feature_names=list(FEATURE_NAMES),
+        feature_names=list(extractor.feature_names),
+        classifier_name=args.classifier,
         scaler=scaler,
         classifier=classifier,
         data_config=data_config,
@@ -188,7 +226,7 @@ def main() -> None:
         y_val=y_val,
         train_model_time_ms=train_times_ms,
         val_model_time_ms=val_times_ms,
-        feature_names=np.asarray(FEATURE_NAMES),
+        feature_names=np.asarray(extractor.feature_names),
     )
 
     curve_df = build_precision_recall_curve(y_true=y_val, y_score=val_scores)

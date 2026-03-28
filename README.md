@@ -69,7 +69,25 @@ pip install -r requirements.txt
 ```bash
 python -m src.model_train \
   --data-path data/knowledge_bench_public.csv \
+  --model-name-or-path ai-sage/GigaChat3-10B-A1.8B-bf16 \
+  --classifier lightgbm
+```
+
+## Быстрый цикл экспериментов
+
+Если не хочется каждый раз заново прогонять `GigaChat`, можно разделить пайплайн на 2 этапа:
+
+```bash
+python -m src.extract_features \
+  --data-path data/knowledge_bench_public.csv \
   --model-name-or-path ai-sage/GigaChat3-10B-A1.8B-bf16
+```
+
+После этого можно быстро обучать разные табличные модели на уже сохраненных признаках:
+
+```bash
+python -m src.train_tabular --classifier lightgbm
+python -m src.train_tabular --classifier logreg
 ```
 
 Артефакты сохраняются в:

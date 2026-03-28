@@ -28,8 +28,12 @@ class HallucinationInferencePipeline:
 
         with Timer() as timer:
             feature_vector = forward_result.feature_vector.reshape(1, -1)
-            feature_vector_scaled = self.bundle.scaler.transform(feature_vector)
-            probability = float(self.bundle.classifier.predict_proba(feature_vector_scaled)[0, 1])
+            features_for_model = (
+                self.bundle.scaler.transform(feature_vector)
+                if self.bundle.scaler is not None
+                else feature_vector
+            )
+            probability = float(self.bundle.classifier.predict_proba(features_for_model)[0, 1])
 
         return InferenceResult(
             hallucination_probability=probability,
