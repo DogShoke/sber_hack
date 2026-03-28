@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from src.config import ModelConfig
 
@@ -16,20 +16,47 @@ from src.config import ModelConfig
 BASE_FEATURE_NAMES = [
     "answer_length_chars",
     "answer_length_tokens",
+    "prompt_length_chars",
+    "prompt_length_tokens_approx",
+    "answer_prompt_length_ratio",
+    "prompt_answer_token_overlap_ratio",
+    "answer_new_token_ratio",
+    "prompt_number_count",
+    "answer_number_count",
+    "new_number_ratio",
+    "prompt_capitalized_token_count",
+    "answer_capitalized_token_count",
+    "answer_new_capitalized_ratio",
+    "question_type_who",
+    "question_type_when",
+    "question_type_where",
+    "question_type_how_many",
+    "question_type_what",
     "mean_logprob",
     "min_logprob",
     "std_logprob",
     "mean_entropy",
     "max_entropy",
+    "logprob_p10",
+    "logprob_p25",
+    "entropy_p75",
+    "entropy_p90",
+    "low_logprob_fraction",
+    "high_entropy_fraction",
+    "top1_top2_margin_mean",
+    "top1_top2_margin_min",
+    "top1_top2_margin_p10",
     "num_sentences",
     "sentence_mean_logprob_mean",
     "sentence_mean_logprob_min",
     "sentence_mean_logprob_std",
+    "sentence_mean_logprob_range",
     "sentence_max_entropy_mean",
     "sentence_max_entropy_max",
+    "sentence_max_entropy_std",
 ]
 HIDDEN_FEATURE_STATS = ("mean", "std", "l2")
-DEFAULT_LAYER_SPECS = ("mid", "late", "last")
+DEFAULT_LAYER_SPECS = ("early", "mid", "late", "last")
 
 
 @dataclass(slots=True)
@@ -43,12 +70,19 @@ def get_feature_names(layer_specs: tuple[str, ...] = DEFAULT_LAYER_SPECS) -> lis
     feature_names = list(BASE_FEATURE_NAMES)
     for layer_name in layer_specs:
         for stat_name in HIDDEN_FEATURE_STATS:
-            feature_names.append(f"hidden_{layer_name}_{stat_name}")
+            feature_names.append(f"hidden_answer_{layer_name}_{stat_name}")
     for left_layer, right_layer in zip(layer_specs[:-1], layer_specs[1:], strict=True):
         feature_names.extend(
             [
-                f"layer_cosine_distance_{left_layer}_vs_{right_layer}",
-                f"layer_l2_distance_{left_layer}_vs_{right_layer}",
+                f"layer_answer_cosine_distance_{left_layer}_vs_{right_layer}",
+                f"layer_answer_l2_distance_{left_layer}_vs_{right_layer}",
+            ]
+        )
+    for layer_name in layer_specs:
+        feature_names.extend(
+            [
+                f"prompt_answer_cosine_distance_{layer_name}",
+                f"prompt_answer_l2_distance_{layer_name}",
             ]
         )
     return feature_names
@@ -60,9 +94,15 @@ FEATURE_NAMES = get_feature_names()
 def extract_uncertainty_features(
     token_logprobs: torch.Tensor,
     token_entropies: torch.Tensor,
+    answer_logits: torch.Tensor,
 ) -> np.ndarray:
     if token_logprobs.numel() == 0:
-        return np.zeros(5, dtype=np.float32)
+        return np.zeros(14, dtype=np.float32)
+
+    sorted_logits = torch.topk(answer_logits, k=2, dim=-1).values
+    top1_top2_margin = sorted_logits[:, 0] - sorted_logits[:, 1]
+    low_logprob_threshold = torch.quantile(token_logprobs, 0.1).item()
+    high_entropy_threshold = torch.quantile(token_entropies, 0.9).item()
 
     return np.asarray(
         [
@@ -71,6 +111,15 @@ def extract_uncertainty_features(
             token_logprobs.std(unbiased=False).item() if token_logprobs.numel() > 1 else 0.0,
             token_entropies.mean().item(),
             token_entropies.max().item(),
+            torch.quantile(token_logprobs, 0.10).item(),
+            torch.quantile(token_logprobs, 0.25).item(),
+            torch.quantile(token_entropies, 0.75).item(),
+            torch.quantile(token_entropies, 0.90).item(),
+            float((token_logprobs <= low_logprob_threshold).float().mean().item()),
+            float((token_entropies >= high_entropy_threshold).float().mean().item()),
+            float(top1_top2_margin.mean().item()),
+            float(top1_top2_margin.min().item()),
+            float(torch.quantile(top1_top2_margin, 0.10).item()),
         ],
         dtype=np.float32,
     )
@@ -87,6 +136,47 @@ def extract_basic_text_features(answer_text: str, num_tokens: int) -> np.ndarray
     )
 
 
+def extract_prompt_answer_features(prompt_text: str, answer_text: str, answer_num_tokens: int) -> np.ndarray:
+    normalized_prompt = prompt_text or ""
+    normalized_answer = answer_text or ""
+
+    prompt_tokens = _simple_tokenize(normalized_prompt)
+    answer_tokens = _simple_tokenize(normalized_answer)
+    prompt_token_set = set(prompt_tokens)
+    answer_token_set = set(answer_tokens)
+    overlap_count = len(prompt_token_set & answer_token_set)
+    answer_new_tokens = answer_token_set - prompt_token_set
+
+    prompt_numbers = set(_extract_numbers(normalized_prompt))
+    answer_numbers = set(_extract_numbers(normalized_answer))
+    new_numbers = answer_numbers - prompt_numbers
+
+    prompt_capitalized = set(_extract_capitalized_tokens(normalized_prompt))
+    answer_capitalized = set(_extract_capitalized_tokens(normalized_answer))
+    new_capitalized = answer_capitalized - prompt_capitalized
+
+    prompt_token_count = max(len(prompt_tokens), 1)
+    answer_token_count = max(answer_num_tokens, len(answer_tokens), 1)
+
+    return np.asarray(
+        [
+            float(len(normalized_prompt)),
+            float(len(prompt_tokens)),
+            float(answer_token_count / prompt_token_count),
+            float(overlap_count / max(len(answer_token_set), 1)),
+            float(len(answer_new_tokens) / max(len(answer_token_set), 1)),
+            float(len(prompt_numbers)),
+            float(len(answer_numbers)),
+            float(len(new_numbers) / max(len(answer_numbers), 1)),
+            float(len(prompt_capitalized)),
+            float(len(answer_capitalized)),
+            float(len(new_capitalized) / max(len(answer_capitalized), 1)),
+            *_extract_question_type_features(normalized_prompt),
+        ],
+        dtype=np.float32,
+    )
+
+
 def extract_sentence_uncertainty_features(
     token_logprobs: torch.Tensor,
     token_entropies: torch.Tensor,
@@ -95,7 +185,7 @@ def extract_sentence_uncertainty_features(
 ) -> np.ndarray:
     sentence_spans = _approximate_sentence_token_spans(answer_text=answer_text, num_tokens=num_answer_tokens)
     if not sentence_spans:
-        return np.zeros(6, dtype=np.float32)
+        return np.zeros(8, dtype=np.float32)
 
     sentence_mean_logprobs: list[float] = []
     sentence_max_entropies: list[float] = []
@@ -108,7 +198,7 @@ def extract_sentence_uncertainty_features(
         sentence_max_entropies.append(float(sentence_entropies.max().item()))
 
     if not sentence_mean_logprobs:
-        return np.zeros(6, dtype=np.float32)
+        return np.zeros(8, dtype=np.float32)
 
     mean_logprobs = np.asarray(sentence_mean_logprobs, dtype=np.float32)
     max_entropies = np.asarray(sentence_max_entropies, dtype=np.float32)
@@ -118,8 +208,10 @@ def extract_sentence_uncertainty_features(
             float(mean_logprobs.mean()),
             float(mean_logprobs.min()),
             float(mean_logprobs.std()),
+            float(mean_logprobs.max() - mean_logprobs.min()),
             float(max_entropies.mean()),
             float(max_entropies.max()),
+            float(max_entropies.std()),
         ],
         dtype=np.float32,
     )
@@ -127,19 +219,25 @@ def extract_sentence_uncertainty_features(
 
 def extract_hidden_state_features(
     hidden_states: tuple[torch.Tensor, ...],
+    prompt_end: int,
     answer_start: int,
     seq_len: int,
     layer_specs: tuple[str, ...] = DEFAULT_LAYER_SPECS,
 ) -> np.ndarray:
+    num_hidden_features = (
+        len(layer_specs) * len(HIDDEN_FEATURE_STATS)
+        + max(len(layer_specs) - 1, 0) * 2
+        + len(layer_specs) * 2
+    )
     if seq_len <= answer_start:
-        num_hidden_features = len(layer_specs) * len(HIDDEN_FEATURE_STATS) + max(len(layer_specs) - 1, 0) * 2
         return np.zeros(num_hidden_features, dtype=np.float32)
 
     selected_layers = _select_hidden_layers(hidden_states=hidden_states, layer_specs=layer_specs)
-    pooled_vectors = [_pool_answer_hidden_state(layer_tensor, answer_start, seq_len) for layer_tensor in selected_layers]
+    prompt_vectors = [_pool_hidden_state_span(layer_tensor, 0, prompt_end) for layer_tensor in selected_layers]
+    answer_vectors = [_pool_hidden_state_span(layer_tensor, answer_start, seq_len) for layer_tensor in selected_layers]
 
     feature_values: list[float] = []
-    for pooled_vector in pooled_vectors:
+    for pooled_vector in answer_vectors:
         feature_values.extend(
             [
                 float(pooled_vector.mean().item()),
@@ -148,7 +246,7 @@ def extract_hidden_state_features(
             ]
         )
 
-    for left_vector, right_vector in zip(pooled_vectors[:-1], pooled_vectors[1:], strict=True):
+    for left_vector, right_vector in zip(answer_vectors[:-1], answer_vectors[1:], strict=True):
         cosine_similarity = torch.nn.functional.cosine_similarity(
             left_vector.unsqueeze(0),
             right_vector.unsqueeze(0),
@@ -157,6 +255,18 @@ def extract_hidden_state_features(
             [
                 float(1.0 - cosine_similarity),
                 float(torch.linalg.vector_norm(left_vector - right_vector).item()),
+            ]
+        )
+
+    for prompt_vector, answer_vector in zip(prompt_vectors, answer_vectors, strict=True):
+        cosine_similarity = torch.nn.functional.cosine_similarity(
+            prompt_vector.unsqueeze(0),
+            answer_vector.unsqueeze(0),
+        ).item()
+        feature_values.extend(
+            [
+                float(1.0 - cosine_similarity),
+                float(torch.linalg.vector_norm(prompt_vector - answer_vector).item()),
             ]
         )
 
@@ -189,9 +299,28 @@ class GigaChatFeatureExtractor:
         }
         if self.config.device_map:
             model_kwargs["device_map"] = self.config.device_map
+        if self.config.low_cpu_mem_usage:
+            model_kwargs["low_cpu_mem_usage"] = True
+        if self.config.offload_folder is not None:
+            model_kwargs["offload_folder"] = str(self.config.offload_folder)
+
+        if self.config.load_in_4bit and self.config.load_in_8bit:
+            raise ValueError("Only one quantization mode can be enabled at a time.")
+
+        if self.config.load_in_4bit:
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
+        elif self.config.load_in_8bit:
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_8bit=True,
+            )
 
         torch_dtype = _resolve_torch_dtype(self.config.torch_dtype)
-        if torch_dtype is not None:
+        if torch_dtype is not None and not (self.config.load_in_4bit or self.config.load_in_8bit):
             model_kwargs["torch_dtype"] = torch_dtype
 
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -239,6 +368,7 @@ class GigaChatFeatureExtractor:
         feature_vector = build_feature_vector(
             logits=outputs.logits,
             input_ids=token_ids,
+            prompt_text=prompt,
             answer_start=answer_start_idx,
             answer_text=answer,
             hidden_states=outputs.hidden_states,
@@ -257,6 +387,7 @@ class GigaChatFeatureExtractor:
 def build_feature_vector(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
+    prompt_text: str,
     answer_start: int,
     answer_text: str,
     hidden_states: tuple[torch.Tensor, ...],
@@ -269,18 +400,24 @@ def build_feature_vector(
         answer_text=answer_text,
         num_tokens=num_answer_tokens,
     )
+    prompt_answer_features = extract_prompt_answer_features(
+        prompt_text=prompt_text,
+        answer_text=answer_text,
+        answer_num_tokens=num_answer_tokens,
+    )
 
     if num_answer_tokens == 0:
-        uncertainty_features = np.zeros(5, dtype=np.float32)
-        sentence_features = np.zeros(6, dtype=np.float32)
+        uncertainty_features = np.zeros(14, dtype=np.float32)
+        sentence_features = np.zeros(8, dtype=np.float32)
         hidden_features = extract_hidden_state_features(
             hidden_states=hidden_states,
+            prompt_end=answer_start,
             answer_start=answer_start,
             seq_len=seq_len,
         )
-        return np.concatenate([basic_text_features, uncertainty_features, sentence_features, hidden_features]).astype(
-            np.float32
-        )
+        return np.concatenate(
+            [basic_text_features, prompt_answer_features, uncertainty_features, sentence_features, hidden_features]
+        ).astype(np.float32)
 
     answer_logits = logits[0, answer_start - 1 : seq_len - 1, :].float()
     log_probs = torch.log_softmax(answer_logits, dim=-1)
@@ -292,6 +429,7 @@ def build_feature_vector(
     uncertainty_features = extract_uncertainty_features(
         token_logprobs=token_logprobs,
         token_entropies=token_entropies,
+        answer_logits=answer_logits,
     )
     sentence_features = extract_sentence_uncertainty_features(
         token_logprobs=token_logprobs,
@@ -301,12 +439,13 @@ def build_feature_vector(
     )
     hidden_features = extract_hidden_state_features(
         hidden_states=hidden_states,
+        prompt_end=answer_start,
         answer_start=answer_start,
         seq_len=seq_len,
     )
-    return np.concatenate([basic_text_features, uncertainty_features, sentence_features, hidden_features]).astype(
-        np.float32
-    )
+    return np.concatenate(
+        [basic_text_features, prompt_answer_features, uncertainty_features, sentence_features, hidden_features]
+    ).astype(np.float32)
 
 
 def _resolve_torch_dtype(dtype_name: str) -> torch.dtype | None:
@@ -326,6 +465,33 @@ def _extract_input_ids(template_output: Any) -> list[int]:
     if isinstance(template_output, list):
         return template_output
     raise TypeError(f"Unsupported chat template output type: {type(template_output)!r}")
+
+
+def _simple_tokenize(text: str) -> list[str]:
+    return re.findall(r"\w+", text.lower(), flags=re.UNICODE)
+
+
+def _extract_numbers(text: str) -> list[str]:
+    return re.findall(r"\d+(?:[.,]\d+)?", text)
+
+
+def _extract_capitalized_tokens(text: str) -> list[str]:
+    return re.findall(r"\b[А-ЯA-Z][а-яa-zA-ZА-ЯA-Z\-]+\b", text)
+
+
+def _extract_question_type_features(prompt_text: str) -> list[float]:
+    normalized_prompt = prompt_text.lower()
+    return [
+        float("кто" in normalized_prompt or "who" in normalized_prompt),
+        float("когда" in normalized_prompt or "when" in normalized_prompt),
+        float("где" in normalized_prompt or "where" in normalized_prompt),
+        float(
+            "сколько" in normalized_prompt
+            or "how many" in normalized_prompt
+            or "how much" in normalized_prompt
+        ),
+        float("что" in normalized_prompt or "what" in normalized_prompt),
+    ]
 
 
 def _approximate_sentence_token_spans(answer_text: str, num_tokens: int) -> list[tuple[int, int]]:
@@ -367,7 +533,9 @@ def _select_hidden_layers(
     num_states = len(hidden_states)
     layer_indices: list[int] = []
     for layer_spec in layer_specs:
-        if layer_spec == "mid":
+        if layer_spec == "early":
+            layer_indices.append(max(1, num_states // 4))
+        elif layer_spec == "mid":
             layer_indices.append(max(1, num_states // 2))
         elif layer_spec == "late":
             layer_indices.append(max(1, num_states - 3))
@@ -379,12 +547,12 @@ def _select_hidden_layers(
     return [hidden_states[layer_index] for layer_index in layer_indices]
 
 
-def _pool_answer_hidden_state(
+def _pool_hidden_state_span(
     layer_hidden_state: torch.Tensor,
-    answer_start: int,
-    seq_len: int,
+    start: int,
+    end: int,
 ) -> torch.Tensor:
-    answer_hidden_state = layer_hidden_state[0, answer_start:seq_len, :].float()
-    if answer_hidden_state.shape[0] == 0:
+    hidden_state_span = layer_hidden_state[0, start:end, :].float()
+    if hidden_state_span.shape[0] == 0:
         return torch.zeros(layer_hidden_state.shape[-1], dtype=torch.float32, device=layer_hidden_state.device)
-    return answer_hidden_state.mean(dim=0)
+    return hidden_state_span.mean(dim=0)
