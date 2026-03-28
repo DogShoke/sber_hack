@@ -8,7 +8,7 @@ import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -37,7 +37,20 @@ def parse_args() -> argparse.Namespace:
         "--cv-folds",
         type=int,
         default=5,
-        help="Number of CV folds for GridSearchCV.",
+        help="Number of CV folds for hyperparameter search.",
+    )
+    parser.add_argument(
+        "--search-type",
+        type=str,
+        choices=("random", "grid"),
+        default="random",
+        help="Search strategy. Random search is the practical default.",
+    )
+    parser.add_argument(
+        "--n-iter",
+        type=int,
+        default=32,
+        help="Number of random-search iterations when --search-type=random.",
     )
     parser.add_argument(
         "--output-model-path",
@@ -131,14 +144,26 @@ def main() -> None:
     X_train_search = pd.DataFrame(X_train, columns=feature_names) if args.classifier == "lightgbm" else X_train
     X_val_eval = pd.DataFrame(X_val, columns=feature_names) if args.classifier == "lightgbm" else X_val
 
-    search = GridSearchCV(
-        estimator=estimator,
-        param_grid=param_grid,
-        scoring="average_precision",
-        cv=cv,
-        n_jobs=-1,
-        verbose=1,
-    )
+    if args.search_type == "grid":
+        search = GridSearchCV(
+            estimator=estimator,
+            param_grid=param_grid,
+            scoring="average_precision",
+            cv=cv,
+            n_jobs=-1,
+            verbose=1,
+        )
+    else:
+        search = RandomizedSearchCV(
+            estimator=estimator,
+            param_distributions=param_grid,
+            n_iter=args.n_iter,
+            scoring="average_precision",
+            cv=cv,
+            n_jobs=-1,
+            verbose=1,
+            random_state=train_config.seed,
+        )
     search.fit(X_train_search, y_train)
 
     best_model = search.best_estimator_
