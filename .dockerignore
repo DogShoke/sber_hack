@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+outputs
+offload
+hf_cache
+.ipynb_checkpoints
+.idea
+.vscode
+*.log
