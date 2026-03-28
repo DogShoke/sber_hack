@@ -19,14 +19,33 @@ BASE_FEATURE_NAMES = [
     "prompt_length_chars",
     "prompt_length_tokens_approx",
     "answer_prompt_length_ratio",
+    "answer_prompt_char_length_ratio",
     "prompt_answer_token_overlap_ratio",
+    "prompt_answer_bigram_overlap_ratio",
     "answer_new_token_ratio",
+    "answer_lexical_diversity",
+    "prompt_lexical_diversity",
+    "answer_prompt_lexical_diversity_gap",
     "prompt_number_count",
     "answer_number_count",
     "new_number_ratio",
+    "prompt_year_count",
+    "answer_year_count",
+    "new_year_ratio",
+    "prompt_date_like_count",
+    "answer_date_like_count",
+    "new_date_like_ratio",
     "prompt_capitalized_token_count",
     "answer_capitalized_token_count",
     "answer_new_capitalized_ratio",
+    "answer_specificity_score",
+    "answer_specificity_prompt_gap",
+    "answer_digit_token_ratio",
+    "answer_long_token_ratio",
+    "answer_punctuation_density",
+    "answer_comma_density",
+    "answer_bracket_density",
+    "answer_quote_density",
     "question_type_who",
     "question_type_when",
     "question_type_where",
@@ -113,13 +132,22 @@ def extract_prompt_answer_features(prompt_text: str, answer_text: str, answer_nu
     answer_tokens = _simple_tokenize(normalized_answer)
     prompt_token_set = set(prompt_tokens)
     answer_token_set = set(answer_tokens)
+    prompt_bigrams = _extract_ngrams(prompt_tokens, n=2)
+    answer_bigrams = _extract_ngrams(answer_tokens, n=2)
 
     overlap_count = len(prompt_token_set & answer_token_set)
+    bigram_overlap_count = len(prompt_bigrams & answer_bigrams)
     answer_new_tokens = answer_token_set - prompt_token_set
 
     prompt_numbers = set(_extract_numbers(normalized_prompt))
     answer_numbers = set(_extract_numbers(normalized_answer))
     new_numbers = answer_numbers - prompt_numbers
+    prompt_years = set(_extract_years(normalized_prompt))
+    answer_years = set(_extract_years(normalized_answer))
+    new_years = answer_years - prompt_years
+    prompt_dates = set(_extract_date_like_strings(normalized_prompt))
+    answer_dates = set(_extract_date_like_strings(normalized_answer))
+    new_dates = answer_dates - prompt_dates
 
     prompt_capitalized = set(_extract_capitalized_tokens(normalized_prompt))
     answer_capitalized = set(_extract_capitalized_tokens(normalized_answer))
@@ -127,20 +155,45 @@ def extract_prompt_answer_features(prompt_text: str, answer_text: str, answer_nu
 
     prompt_token_count = max(len(prompt_tokens), 1)
     answer_token_count = max(answer_num_tokens, len(answer_tokens), 1)
+    prompt_char_count = max(len(normalized_prompt), 1)
+    answer_char_count = max(len(normalized_answer), 1)
+    answer_lexical_diversity = len(answer_token_set) / answer_token_count
+    prompt_lexical_diversity = len(prompt_token_set) / prompt_token_count
+    answer_specificity_score = _compute_specificity_score(normalized_answer, answer_tokens)
+    prompt_specificity_score = _compute_specificity_score(normalized_prompt, prompt_tokens)
 
     return np.asarray(
         [
             float(len(normalized_prompt)),
             float(len(prompt_tokens)),
             float(answer_token_count / prompt_token_count),
+            float(answer_char_count / prompt_char_count),
             float(overlap_count / max(len(answer_token_set), 1)),
+            float(bigram_overlap_count / max(len(answer_bigrams), 1)),
             float(len(answer_new_tokens) / max(len(answer_token_set), 1)),
+            float(answer_lexical_diversity),
+            float(prompt_lexical_diversity),
+            float(answer_lexical_diversity - prompt_lexical_diversity),
             float(len(prompt_numbers)),
             float(len(answer_numbers)),
             float(len(new_numbers) / max(len(answer_numbers), 1)),
+            float(len(prompt_years)),
+            float(len(answer_years)),
+            float(len(new_years) / max(len(answer_years), 1)),
+            float(len(prompt_dates)),
+            float(len(answer_dates)),
+            float(len(new_dates) / max(len(answer_dates), 1)),
             float(len(prompt_capitalized)),
             float(len(answer_capitalized)),
             float(len(new_capitalized) / max(len(answer_capitalized), 1)),
+            float(answer_specificity_score),
+            float(answer_specificity_score - prompt_specificity_score),
+            float(_count_digit_tokens(answer_tokens) / answer_token_count),
+            float(_count_long_tokens(answer_tokens) / answer_token_count),
+            float(_count_matches(normalized_answer, r"[,:;]") / answer_char_count),
+            float(_count_matches(normalized_answer, r",") / answer_char_count),
+            float(_count_matches(normalized_answer, r"[\(\)\[\]\{\}]") / answer_char_count),
+            float(_count_matches(normalized_answer, r"[\"'«»]") / answer_char_count),
             *_extract_question_type_features(normalized_prompt),
         ],
         dtype=np.float32,
@@ -420,12 +473,48 @@ def _simple_tokenize(text: str) -> list[str]:
     return re.findall(r"\w+", text.lower(), flags=re.UNICODE)
 
 
+def _extract_ngrams(tokens: list[str], n: int) -> set[tuple[str, ...]]:
+    if len(tokens) < n:
+        return set()
+    return {tuple(tokens[index : index + n]) for index in range(len(tokens) - n + 1)}
+
+
 def _extract_numbers(text: str) -> list[str]:
     return re.findall(r"\d+(?:[.,]\d+)?", text)
 
 
+def _extract_years(text: str) -> list[str]:
+    return re.findall(r"\b(?:1[5-9]\d{2}|20\d{2}|21\d{2})\b", text)
+
+
+def _extract_date_like_strings(text: str) -> list[str]:
+    return re.findall(r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b", text)
+
+
 def _extract_capitalized_tokens(text: str) -> list[str]:
     return re.findall(r"\b[А-ЯA-Z][а-яa-zA-ZА-ЯA-Z\-]+\b", text)
+
+
+def _count_digit_tokens(tokens: list[str]) -> int:
+    return sum(any(character.isdigit() for character in token) for token in tokens)
+
+
+def _count_long_tokens(tokens: list[str], min_length: int = 10) -> int:
+    return sum(len(token) >= min_length for token in tokens)
+
+
+def _count_matches(text: str, pattern: str) -> int:
+    return len(re.findall(pattern, text))
+
+
+def _compute_specificity_score(text: str, tokens: list[str]) -> float:
+    token_count = max(len(tokens), 1)
+    number_ratio = len(_extract_numbers(text)) / token_count
+    year_ratio = len(_extract_years(text)) / token_count
+    capitalized_ratio = len(_extract_capitalized_tokens(text)) / token_count
+    long_token_ratio = _count_long_tokens(tokens) / token_count
+    punctuation_ratio = _count_matches(text, r"[,:;]") / max(len(text), 1)
+    return float(number_ratio + year_ratio + capitalized_ratio + long_token_ratio + punctuation_ratio)
 
 
 def _extract_question_type_features(prompt_text: str) -> list[float]:
